@@ -13,3 +13,4 @@ Two-tab Dash app with company and employee reports.
 ## Contents
 - `app.py`: Dash app with company and employee report tabs, charts, and compact KPI tables.
 - `requirements.txt`: Python dependencies.
+- `data/X_test_with_shap_posneg_mocked.csv`: Source data feeding both tabs.
