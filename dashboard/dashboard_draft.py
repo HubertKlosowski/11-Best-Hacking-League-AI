@@ -4,54 +4,35 @@ import plotly.express as px
 import plotly.graph_objects as go
 from dash import Dash, Input, Output, dash_table, dcc, html
 
-
-def build_prompt_logs(num_rows: int = 320) -> pd.DataFrame:
-    """Simulated prompt-level logs with energy consumption."""
-    np.random.seed(12)
-    start = pd.to_datetime("2024-09-01")
-    dates = start + pd.to_timedelta(np.random.randint(0, 75, size=num_rows), unit="D")
-    departments = ["Engineering", "Data Science", "Product", "GTM", "Operations"]
-    users = {
-        "Engineering": ["Alex Rivera", "Priya Shah", "Sam Taylor"],
-        "Data Science": ["Chen Li", "Olivia Stone"],
-        "Product": ["Jamie Brooks", "Morgan Lee"],
-        "GTM": ["Casey Ward", "Jordan Fox"],
-        "Operations": ["Riley Cruz", "Taylor Kim"],
-    }
-    models = ["Orion-70B", "Nimbus-34B", "Atlas-12B", "Quill-9B", "Focus-7B"]
-    categories = ["Chat", "Code", "Retrieval", "Vision"]
-    devices = ["Laptop", "Desktop", "Mobile", "Edge GPU"]
-
-    records = []
-    for i in range(num_rows):
-        dept = np.random.choice(departments)
-        user = np.random.choice(users[dept])
-        category = np.random.choice(categories, p=[0.45, 0.2, 0.25, 0.1])
-        model = np.random.choice(models, p=[0.28, 0.24, 0.2, 0.16, 0.12])
-        device = np.random.choice(devices, p=[0.45, 0.25, 0.2, 0.1])
-        energy_wh = np.random.uniform(5000, 15000)  # per prompt, larger to make MWh totals readable
-        prompt_text = f"Prompt #{i+1} about {category.lower()} on {model}"
-        response_text = f"Response for {category.lower()} with {model}"
-        records.append(
-            {
-                "Date": dates[i],
-                "Department": dept,
-                "User": user,
-                "Model": model,
-                "Device": device,
-                "Prompt Category": category,
-                "Prompt Text": prompt_text,
-                "Response Text": response_text,
-                "Prompt Count": 1,
-                "Energy (Wh)": round(energy_wh, 1),
-            }
-        )
-    return pd.DataFrame(records)
+DATA_PATH = "data/X_test_with_shap_posneg_mocked.csv"
 
 
-prompt_logs_df = build_prompt_logs()
-USER_NAME = "Alex Rivera"
-USER_DEPARTMENT = "Engineering"
+def load_prompt_logs() -> pd.DataFrame:
+    """Load prompt logs from CSV and derive fields used in the dashboard."""
+    df = pd.read_csv(DATA_PATH, parse_dates=["prompt_datetime"])
+    df = df.rename(
+        columns={
+            "prompt_datetime": "Date",
+            "prompt_category": "Prompt Category",
+            "department": "Department",
+            "user_id": "User",
+            "model_name": "Model",
+            "device_type": "Device",
+        }
+    )
+
+    df["Date"] = pd.to_datetime(df["Date"])
+    df["Prompt Count"] = 1
+    token_sum = df["prompt_token_length"].fillna(0) + df["response_token_length"].fillna(0)
+    df["Energy (Wh)"] = (token_sum * 100).round(1)
+    df["Prompt Text"] = "Prompt about " + df["Prompt Category"].astype(str)
+    df["Response Text"] = "Response from " + df["Model"].astype(str)
+    return df
+
+
+prompt_logs_df = load_prompt_logs()
+USER_NAME = str(prompt_logs_df["User"].iloc[0])
+USER_DEPARTMENT = str(prompt_logs_df[prompt_logs_df["User"] == USER_NAME]["Department"].iloc[0])
 MIN_DATE = prompt_logs_df["Date"].min().date()
 MAX_DATE = prompt_logs_df["Date"].max().date()
 
@@ -233,9 +214,8 @@ def build_user_category_donut(filtered_df: pd.DataFrame):
     return fig
 
 
-def build_user_prompts_fig(user_df: pd.DataFrame, baseline_df: pd.DataFrame, freq: str, comparison_label: str):
+def build_user_prompts_fig(user_df: pd.DataFrame, freq: str):
     user_agg = aggregate_prompts(user_df, freq)
-    baseline_agg = aggregate_prompts(baseline_df, freq)
     if freq == "D":
         fig = go.Figure()
         fig.add_trace(
@@ -246,15 +226,6 @@ def build_user_prompts_fig(user_df: pd.DataFrame, baseline_df: pd.DataFrame, fre
                 marker_color=px.colors.sequential.Blues[4],
             )
         )
-        fig.add_trace(
-            go.Scatter(
-                x=baseline_agg["Date"],
-                y=baseline_agg["Prompts"],
-                mode="lines",
-                name=comparison_label,
-                line={"shape": "spline", "color": "#b0b7c3"},
-            )
-        )
         dt_series = pd.to_datetime(user_agg["Date"])
         month_groups = dt_series.groupby(dt_series.dt.to_period("M"))
         tickvals = []
@@ -263,7 +234,7 @@ def build_user_prompts_fig(user_df: pd.DataFrame, baseline_df: pd.DataFrame, fre
             midpoint = dates.min() + (dates.max() - dates.min()) / 2
             tickvals.append(midpoint)
             ticktext.append(period.strftime("%b"))
-        fig.update_layout(title=f"Prompts over time (User vs {comparison_label})", yaxis_title="", xaxis_title="")
+        fig.update_layout(title="Prompts over time", yaxis_title="", xaxis_title="")
         fig.update_xaxes(
             type="date",
             title="",
@@ -278,10 +249,9 @@ def build_user_prompts_fig(user_df: pd.DataFrame, baseline_df: pd.DataFrame, fre
             x="Label",
             y="Prompts",
             markers=True,
-            title=f"Prompts over time (User vs {comparison_label})",
+            title="Prompts over time",
             labels={"Prompts": "User"},
         )
-        fig.add_scatter(x=baseline_agg["Label"], y=baseline_agg["Prompts"], mode="lines+markers", name=comparison_label)
         fig.update_xaxes(categoryorder="array", categoryarray=user_agg["Label"])
     fig.update_layout(yaxis_title="", xaxis_title="")
     return fig
@@ -552,111 +522,67 @@ def update_company_dashboard(start_date, end_date, freq):
         Input("user-date-range", "start_date"),
         Input("user-date-range", "end_date"),
         Input("user-prompt-agg", "value"),
-        Input("user-comparison-mode", "value"),
     ],
 )
-def update_user_dashboard(start_date, end_date, freq, comparison_mode):
+def update_user_dashboard(start_date, end_date, freq):
     filtered = filter_by_date(prompt_logs_df, start_date, end_date)
     user_df = filtered[filtered["User"] == USER_NAME]
-    baseline_df = filtered[filtered["Department"] == USER_DEPARTMENT] if comparison_mode == "Department" else filtered
-    comparison_label = "Department baseline" if comparison_mode == "Department" else "Company baseline"
 
     if user_df.empty:
         empty_fig = px.bar(title="No user prompts in range")
-        return empty_fig, empty_fig, empty_fig, []
+        return empty_fig, empty_fig, empty_fig, empty_fig, []
 
-    # First row bars
-    baseline_cat = (
-        baseline_df.groupby("Prompt Category").agg({"Energy (Wh)": "sum"}).reset_index().rename(columns={"Energy (Wh)": "Energy (kWh)"})
-    )
-    baseline_cat["Energy (kWh)"] = (baseline_cat["Energy (kWh)"] / 1000).round(1)
-    baseline_cat["Energy (kWh)"] = baseline_cat["Energy (kWh)"] * -1  # negative for left bars
-    baseline_cat = baseline_cat.sort_values(by="Energy (kWh)")  # most negative at top
-    neg_colors = gradient_colors(baseline_cat["Energy (kWh)"], px.colors.sequential.Reds, reverse=False)
+    def extract_shap(df: pd.DataFrame, kind: str) -> pd.DataFrame:
+        rows = []
+        for i in range(1, 6):
+            feat_col = f"{kind}{i}_feature"
+            shap_col = f"{kind}{i}_shap"
+            if feat_col in df and shap_col in df:
+                rows.append(df[[feat_col, shap_col]].rename(columns={feat_col: "feature", shap_col: "shap"}))
+        if not rows:
+            return pd.DataFrame(columns=["feature", "shap"])
+        return pd.concat(rows, ignore_index=True).dropna()
 
-    user_cat = (
-        user_df.groupby("Prompt Category").agg({"Energy (Wh)": "sum"}).reset_index().rename(columns={"Energy (Wh)": "Energy (kWh)"})
-    )
-    user_cat["Energy (kWh)"] = (user_cat["Energy (kWh)"] / 1000).round(1)
-    user_cat = user_cat.sort_values(by="Energy (kWh)", ascending=False)  # largest at top
-    pos_colors = gradient_colors(user_cat["Energy (kWh)"], px.colors.sequential.Blues, reverse=False)
+    # Convert SHAP to watt-hours (assuming shap is in kWh-equivalent scale)
+    shap_to_wh = lambda s: s * 1000
 
-    negative_fig = px.bar(
-        baseline_cat,
-        x="Energy (kWh)",
-        y="Prompt Category",
+    pos_agg = extract_shap(user_df, "pos").groupby("feature")["shap"].mean().reset_index()
+    pos_agg["shap_wh"] = shap_to_wh(pos_agg["shap"])
+    pos_agg = pos_agg.sort_values(by="shap_wh", ascending=True).head(5)  # lowest to highest
+
+    neg_agg = extract_shap(user_df, "neg").groupby("feature")["shap"].mean().reset_index()
+    neg_agg["shap_wh"] = shap_to_wh(neg_agg["shap"])
+    neg_agg = neg_agg.sort_values(by="shap_wh", ascending=False).head(5)  # highest (most negative) to lowest
+
+    neg_fig = px.bar(
+        neg_agg,
+        x="shap_wh",
+        y="feature",
         orientation="h",
-        title=f"{comparison_label} energy (kWh, negative)",
+        title="User strong sides",
+        color="shap_wh",
+        color_continuous_scale=px.colors.sequential.Blues[::-1],
     )
-    negative_fig.update_traces(
-        marker_color=neg_colors,
-        showlegend=False,
-        text=[f"{abs(v):.1f}" for v in baseline_cat["Energy (kWh)"]],
-        textposition="outside",  # value to the left of the bar end
-    )
-    min_val = baseline_cat["Energy (kWh)"].min()
-    negative_fig.update_xaxes(range=[min_val * 1.15, 0], showticklabels=False)
+    neg_fig.update_traces(text=neg_agg["shap_wh"].round(2), textposition="outside")
+    neg_fig.update_layout(showlegend=False, xaxis_title="", yaxis_title="", coloraxis_showscale=False)
 
-    neg_annotations = []
-    for _, row in baseline_cat.iterrows():
-        label_x = 0  # right edge of plot
-        neg_annotations.append(
-            dict(
-                x=label_x,
-                y=row["Prompt Category"],
-                xref="x",
-                yref="y",
-                text=row["Prompt Category"],
-                showarrow=False,
-                xanchor="left",
-                align="left",
-                xshift=8,
-            )
-        )
-    negative_fig.update_yaxes(showticklabels=False)
-    negative_fig.update_layout(yaxis_title="", xaxis_title="", showlegend=False, annotations=neg_annotations)
-
-    positive_fig = px.bar(
-        user_cat,
-        x="Energy (kWh)",
-        y="Prompt Category",
+    pos_fig = px.bar(
+        pos_agg,
+        x="shap_wh",
+        y="feature",
         orientation="h",
-        title="User energy (kWh)",
+        title="Areas to improve",
+        color="shap_wh",
+        color_continuous_scale=px.colors.sequential.Reds,
     )
-    positive_fig.update_traces(
-        marker_color=pos_colors,
-        showlegend=False,
-        text=[f"{v:.1f}" for v in user_cat["Energy (kWh)"]],
-        textposition="outside",  # value to the right of the bar end
-    )
-    pos_padding = user_cat["Energy (kWh)"].max() * 0.15
-    pos_annotations = []
-    for _, row in user_cat.iterrows():
-        pos_annotations.append(
-            dict(
-                x=-0.02,
-                xref="paper",
-                y=row["Prompt Category"],
-                yref="y",
-                text=row["Prompt Category"],
-                showarrow=False,
-                xanchor="right",
-                align="right",
-            )
-        )
-    positive_fig.update_yaxes(showticklabels=False)
-    positive_fig.update_xaxes(
-        showticklabels=False,
-        range=[0, user_cat["Energy (kWh)"].max() * 1.05],
-        zeroline=False,
-    )
-    positive_fig.update_layout(yaxis_title="", xaxis_title="", showlegend=False, annotations=pos_annotations)
+    pos_fig.update_traces(text=pos_agg["shap_wh"].round(2), textposition="outside")
+    pos_fig.update_layout(showlegend=False, xaxis_title="", yaxis_title="", coloraxis_showscale=False)
 
     donut_fig = build_user_category_donut(user_df)
-    prompts_fig = build_user_prompts_fig(user_df, baseline_df, freq, comparison_label)
+    prompts_fig = build_user_prompts_fig(user_df, freq)
     table_data = build_user_table_data(user_df)
-    return donut_fig, negative_fig, positive_fig, prompts_fig, table_data
+    return donut_fig, neg_fig, pos_fig, prompts_fig, table_data
 
 
 if __name__ == "__main__":
-    app.run_server(debug=True)
+    app.run_server(debug=False)
